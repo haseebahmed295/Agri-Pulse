@@ -160,6 +160,7 @@ async def test_ai_05_deterministic_fallback_on_unreachable_endpoint(monkeypatch)
     """Test AI-05: evaluate_field_decision recovers gracefully when endpoint is unreachable."""
     from app.config import settings
 
+    monkeypatch.setattr(settings, "USE_TYPESAFE_API", False)
     monkeypatch.setattr(settings, "LOCAL_MODEL_BASE_URL", "http://127.0.0.1:9999")
     monkeypatch.setattr(settings, "OPENAI_API_BASE_URL", "http://127.0.0.1:9999/v1")
     monkeypatch.setattr(settings, "AI_MODEL_TIMEOUT_SECONDS", 0.1)
@@ -192,6 +193,7 @@ async def test_ai_02_mocked_openai_compatible_endpoint_success(monkeypatch):
     """Test AI-02: Simulates a successful OpenAI-compatible model response."""
     from app.config import settings
 
+    monkeypatch.setattr(settings, "USE_TYPESAFE_API", False)
     monkeypatch.setattr(settings, "USE_FAST_DECISION_ENGINE", False)
 
     mock_model_response = {
@@ -244,3 +246,32 @@ async def test_ai_02_fast_decision_engine_live():
         assert decision.action_plan.water_depth_mm == 24.0
     except Exception as e:
         pytest.skip(f"Live model server not reachable: {e}")
+
+
+@pytest.mark.asyncio
+async def test_typesafe_decision_engine_live():
+    """Test TypeSafe AI System One decision engine on live API."""
+    from app.services.decision_engine import query_typesafe_decision_engine
+    decision = await query_typesafe_decision_engine(SCENARIO_1_WHEAT_CRISIS)
+    assert decision.engine_source == "TYPESAFE_AI_ENGINE"
+    assert decision.selected_decision == CandidateDecision.PREEMPTIVE_NIGHT_PRECHARGE
+    assert decision.sufficiency_status == SufficiencyStatus.CRITICAL_HEAT_DEFICIT
+    assert decision.action_plan.water_depth_mm == 24.0
+    assert "Tonight 22:00" in decision.action_plan.execution_window
+    assert decision.decision_confidence > 0.50
+
+
+@pytest.mark.asyncio
+async def test_typesafe_decision_engine_fallback_on_unreachable(monkeypatch):
+    """Test evaluate_field_decision falls back to deterministic matrix if TypeSafe fails."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "USE_TYPESAFE_API", True)
+    monkeypatch.setattr(settings, "TYPESAFE_BASE_URL", "http://127.0.0.1:9999/v1")
+    monkeypatch.setattr(settings, "TYPESAFE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(settings, "USE_FAST_DECISION_ENGINE", False)
+
+    decision = await evaluate_field_decision(SCENARIO_1_WHEAT_CRISIS)
+    assert decision.engine_source == "DETERMINISTIC_FALLBACK"
+    assert decision.selected_decision == CandidateDecision.PREEMPTIVE_NIGHT_PRECHARGE
+    assert decision.action_plan.water_depth_mm == 24.0

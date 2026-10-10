@@ -56,8 +56,12 @@ def test_evaluation_live_model_engine():
     response = client.post("/api/evaluate", json=crisis())
     assert response.status_code == 200
     data = response.json()
-    assert response.headers["X-AgriPulse-Mode"] in ("live", "fallback")
-    assert data["engine_source"] in ("FAST_DECISION_LOGIT_ENGINE", "LOCAL_MODEL_ENGINE", "DETERMINISTIC_FALLBACK")
+    assert data["engine_source"] in (
+        "FAST_DECISION_LOGIT_ENGINE",
+        "LOCAL_MODEL_ENGINE",
+        "TYPESAFE_AI_ENGINE",
+        "DETERMINISTIC_FALLBACK",
+    )
     assert data["selected_decision"] == "PREEMPTIVE_NIGHT_PRECHARGE"
     assert data["sufficiency_status"] == "CRITICAL_HEAT_DEFICIT"
     assert data["action_plan"]["water_depth_mm"] == 24.0

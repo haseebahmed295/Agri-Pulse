@@ -7,10 +7,17 @@ Conforms to SPEC-AGRI-AI-002.
 """
 
 import json
+import logging
 import math
 import time
 from typing import Any, Dict, List, Tuple
 import httpx
+
+try:
+    from typesafe_sdk import AsyncTypeSafeClient, Choice
+except ImportError:
+    AsyncTypeSafeClient = None  # type: ignore
+    Choice = None  # type: ignore
 
 from app.config import settings
 from app.schemas import (
@@ -21,6 +28,8 @@ from app.schemas import (
     SufficiencyStatus,
 )
 from app.services.guardrails import post_inference_guardrails
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_INSTRUCTION = """You are Agri-Pulse, an expert autonomous agronomic dispatch officer and thermal plant physiologist.
 
@@ -406,13 +415,135 @@ async def query_openai_compatible_model(
         return DecisionOutput.model_validate(parsed)
 
 
+async def query_typesafe_decision_engine(
+    state: Dict[str, Any] | AIDecisionInputPayload,
+) -> DecisionOutput:
+    """Queries TypeSafe AI System One API for cloud-native tactical arbitration."""
+    if AsyncTypeSafeClient is None or Choice is None:
+        raise RuntimeError("typesafe_sdk is not installed")
+
+    api_key = settings.TYPESAFE_API_KEY
+    if not api_key:
+        raise ValueError("TYPESAFE_API_KEY is not configured")
+
+    data = _normalize_state_dict(state)
+    state_str = _format_state_summary(data)
+
+    criteria_decisions = {name: desc for name, desc in CANDIDATE_CHOICES}
+    criteria_status = {
+        "SUFFICIENT_NO_ACTION": "Soil moisture buffer is sufficient; no irrigation required.",
+        "MODERATE_DEFICIT": "Moderate deficit; light application needed.",
+        "CRITICAL_HEAT_DEFICIT": "Critical heat deficit; urgent pre-charge or split application required.",
+    }
+
+    clean_base_url = settings.TYPESAFE_BASE_URL.rstrip("/").removesuffix("/v1")
+    async with AsyncTypeSafeClient(
+        api_key=api_key,
+        base_url=clean_base_url,
+        timeout=settings.TYPESAFE_TIMEOUT_SECONDS,
+    ) as client:
+        response = await client.system_one(
+            state=state_str,
+            model=settings.TYPESAFE_MODEL,
+            questions={
+                "selected_decision": Choice(
+                    instructions="Which tactical irrigation directive must be executed?",
+                    criteria=criteria_decisions,
+                ),
+                "sufficiency_status": Choice(
+                    instructions="What is the water sufficiency status?",
+                    criteria=criteria_status,
+                ),
+            },
+        )
+
+    ans_decision = response.answers["selected_decision"]
+    selected_choice_name = ans_decision.choice
+    confidence = (
+        float(ans_decision.confidence)
+        if getattr(ans_decision, "confidence", None) is not None
+        else 0.95
+    )
+
+    ans_status = response.answers.get("sufficiency_status")
+    status_choice_name = getattr(ans_status, "choice", None) if ans_status else None
+
+    # Map candidate choice into full ActionPlan
+    deficit = float(data.get("hydrology_summary", {}).get("precomputed_deficit_mm", 0.0))
+    crop_name = data.get("crop_context", {}).get("crop", "Crop")
+    peak_temp = data.get("hazard_profile", {}).get("peak_temperature_c", 38.0)
+    soil_type = data.get("hydrology_summary", {}).get("soil_type", "Soil")
+    stage_name = data.get("crop_context", {}).get("growth_stage", "current stage")
+    current_m = data.get("hydrology_summary", {}).get("current_moisture_pct", 15.0)
+
+    if selected_choice_name == "PREEMPTIVE_NIGHT_PRECHARGE":
+        status = SufficiencyStatus.CRITICAL_HEAT_DEFICIT
+        action = CandidateDecision.PREEMPTIVE_NIGHT_PRECHARGE
+        depth = deficit
+        window = "Tonight 22:00 - 04:30 PKT (Prior to Heat Day 1)"
+        damage_reason = (
+            "irreversible pollen sterility"
+            if ("Flowering" in stage_name or "Anthesis" in stage_name)
+            else "acute thermal dehydration"
+        )
+        rationale = (
+            f"{crop_name} faces {damage_reason} if root-zone moisture drops "
+            f"below critical holding thresholds at {peak_temp}°C. Deep night pre-charge establishes a transpirational cooling buffer."
+        )
+    elif selected_choice_name == "SPLIT_CYCLE_LIGHT_IRRIGATION":
+        status = (
+            SufficiencyStatus[status_choice_name]
+            if status_choice_name and status_choice_name in SufficiencyStatus.__members__
+            else SufficiencyStatus.CRITICAL_HEAT_DEFICIT
+        )
+        action = CandidateDecision.SPLIT_CYCLE_LIGHT_IRRIGATION
+        depth = round(deficit / 2.0, 1)
+        window = "Pulsed cycle: 05:00 - 07:00 AM and 20:00 - 22:00 PKT daily"
+        rationale = (
+            f"Acute heat onset in under 24 hours on {soil_type} requires split drip pulsing to sustain "
+            f"{crop_name} vascular turgor and micro-climate cooling without surface pooling."
+        )
+    elif selected_choice_name == "EMERGENCY_CANOPY_COOLING":
+        status = SufficiencyStatus.CRITICAL_HEAT_DEFICIT
+        action = CandidateDecision.EMERGENCY_CANOPY_COOLING
+        depth = min(deficit, 10.0)
+        window = "Daytime misting bursts: 11:00 - 16:00 PKT"
+        rationale = f"Direct canopy cooling active during {peak_temp}°C peak heat hazard."
+    else:  # HOLD_CURRENT_LEVEL
+        status = SufficiencyStatus.SUFFICIENT_NO_ACTION
+        action = CandidateDecision.HOLD_CURRENT_LEVEL
+        depth = 0.0
+        window = "No action required during current forecast window"
+        rationale = (
+            f"Soil moisture in {soil_type} soil is adequate ({current_m}%). "
+            f"Additional watering for {crop_name} risks root-zone oxygen starvation (hypoxia)."
+        )
+
+    depletion = data.get("hydrology_summary", {}).get("simulated_depletion", {})
+    failure_day = depletion.get("projected_failure_day")
+    projected_timestamp = f"Day {failure_day} at 14:00" if failure_day else None
+
+    return DecisionOutput(
+        engine_source="TYPESAFE_AI_ENGINE",
+        sufficiency_status=status,
+        selected_decision=action,
+        decision_confidence=confidence,
+        projected_depletion_timestamp=projected_timestamp,
+        action_plan=ActionPlan(
+            water_depth_mm=depth,
+            execution_window=window,
+            biological_rationale=rationale,
+        ),
+    )
+
+
 async def evaluate_field_decision(
     state: Dict[str, Any] | AIDecisionInputPayload,
 ) -> DecisionOutput:
     """Coordinates AI model evaluation, latency measurement, guardrails, and deterministic fallback.
 
-    Prioritizes fast decision logit scoring, falls back to chat completions, and guarantees
-    <1ms deterministic fallback recovery if offline.
+    Prioritizes TypeSafe AI cloud API, falls back to fast decision logit scoring / chat completions,
+    and guarantees <1ms deterministic fallback recovery if offline.
     """
     start_time = time.perf_counter()
     data = _normalize_state_dict(state)
@@ -420,15 +551,24 @@ async def evaluate_field_decision(
     decision: DecisionOutput | None = None
     source = "DETERMINISTIC_FALLBACK"
 
-    # Step 1: Try Fast Decision Engine if enabled
-    if settings.USE_FAST_DECISION_ENGINE:
+    # Step 1: Try TypeSafe Cloud API if enabled and API key is present
+    if settings.USE_TYPESAFE_API and settings.TYPESAFE_API_KEY:
+        try:
+            decision = await query_typesafe_decision_engine(data)
+            source = "TYPESAFE_AI_ENGINE"
+        except Exception as e:
+            logger.warning("TypeSafe API decision query failed, falling back: %s", e)
+            decision = None
+
+    # Step 2: Try Fast Decision Engine (local llama-server) if enabled and TypeSafe did not evaluate
+    if decision is None and settings.USE_FAST_DECISION_ENGINE:
         try:
             decision = await query_fast_decision_engine(data)
             source = "FAST_DECISION_LOGIT_ENGINE"
         except Exception:
             decision = None
 
-    # Step 2: Try Chat Completions if fast decision failed or disabled
+    # Step 3: Try Chat Completions if fast decision failed or disabled
     if decision is None:
         try:
             decision = await query_openai_compatible_model(data)
@@ -436,12 +576,12 @@ async def evaluate_field_decision(
         except Exception:
             decision = None
 
-    # Step 3: Instant deterministic fallback recovery
+    # Step 4: Instant deterministic fallback recovery
     if decision is None:
         decision = deterministic_fallback(data, reason="Model server offline or timed out")
         source = "DETERMINISTIC_FALLBACK"
 
-    # Step 4: Enforce physical and agronomic guardrails
+    # Step 5: Enforce physical and agronomic guardrails
     decision = post_inference_guardrails(decision, data)
 
     elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)

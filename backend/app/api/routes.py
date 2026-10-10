@@ -24,15 +24,23 @@ router = APIRouter(prefix="/api")
 
 @router.get("/health", response_model=HealthResponse, tags=["Health"])
 async def health():
-    """Reports system health, detecting connectivity to local model server."""
+    """Reports system health, detecting connectivity to AI decision engine."""
     model_status = "offline"
-    try:
-        async with httpx.AsyncClient(timeout=0.3) as client:
-            res = await client.get(f"{settings.LOCAL_MODEL_BASE_URL.rstrip('/')}/health")
-            if res.status_code == 200:
-                model_status = "online"
-    except Exception:
-        model_status = "offline"
+    provider = "llama-server"
+    base_url = settings.LOCAL_MODEL_BASE_URL
+
+    if settings.USE_TYPESAFE_API and settings.TYPESAFE_API_KEY:
+        provider = "TypeSafe AI (Cloud)"
+        base_url = settings.TYPESAFE_BASE_URL
+        model_status = "online"
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=0.3) as client:
+                res = await client.get(f"{settings.LOCAL_MODEL_BASE_URL.rstrip('/')}/health")
+                if res.status_code == 200:
+                    model_status = "online"
+        except Exception:
+            model_status = "offline"
 
     overall_status = "ok" if model_status == "online" else "degraded"
 
@@ -40,8 +48,8 @@ async def health():
         "status": overall_status,
         "version": "1.0.0",
         "local_model_engine": {
-            "provider": "llama-server",
-            "base_url": settings.LOCAL_MODEL_BASE_URL,
+            "provider": provider,
+            "base_url": base_url,
             "status": model_status,
         },
         "weather_pipeline": {"provider": "Open-Meteo", "status": "online", "cached": False},

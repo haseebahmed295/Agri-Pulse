@@ -83,21 +83,22 @@ def _compute_hazard(payload: EvaluateRequest) -> dict:
     crop_info = CROP_HAZARDS.get(payload.crop_type, {"threshold": 38.0, "vuln": "Thermal stress"})
     thresh = crop_info["threshold"]
 
-    # Base heat profile by crop preset
+    # Base season peak afternoon temperature by crop (before heat spike)
     base_peaks = {
-        "Wheat": 41.5,
-        "Cotton": 39.5,
-        "Tomato": 40.0,
-        "Maize": 38.5,
+        "Wheat": 35.5,
+        "Cotton": 33.5,
+        "Tomato": 34.0,
+        "Maize": 32.5,
     }
-    base_peak = base_peaks.get(payload.crop_type, 38.0)
+    base_peak = base_peaks.get(payload.crop_type, 34.0)
 
+    spike = payload.simulated_heat_spike or 0.0
     if payload.peak_temperature_override is not None:
         peak_temp = payload.peak_temperature_override
     else:
-        peak_temp = base_peak + payload.simulated_heat_spike
+        peak_temp = base_peak + spike
 
-    is_heatwave = peak_temp >= thresh or peak_temp >= 38.0
+    is_heatwave = (spike > 0.0) or (peak_temp >= thresh) or (peak_temp >= 38.0)
 
     return {
         "is_heatwave": is_heatwave,
