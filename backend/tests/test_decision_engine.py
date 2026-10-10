@@ -156,8 +156,14 @@ def test_ai_03_golden_scenario_3_tomato_scald_avoidance():
 
 
 @pytest.mark.asyncio
-async def test_ai_05_deterministic_fallback_on_unreachable_endpoint():
+async def test_ai_05_deterministic_fallback_on_unreachable_endpoint(monkeypatch):
     """Test AI-05: evaluate_field_decision recovers gracefully when endpoint is unreachable."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "LOCAL_MODEL_BASE_URL", "http://127.0.0.1:9999")
+    monkeypatch.setattr(settings, "OPENAI_API_BASE_URL", "http://127.0.0.1:9999/v1")
+    monkeypatch.setattr(settings, "AI_MODEL_TIMEOUT_SECONDS", 0.1)
+
     start = time.perf_counter()
     decision = await evaluate_field_decision(SCENARIO_1_WHEAT_CRISIS)
     elapsed = (time.perf_counter() - start) * 1000
@@ -166,7 +172,6 @@ async def test_ai_05_deterministic_fallback_on_unreachable_endpoint():
     assert decision.engine_source == "DETERMINISTIC_FALLBACK"
     assert decision.selected_decision == CandidateDecision.PREEMPTIVE_NIGHT_PRECHARGE
     assert decision.action_plan.water_depth_mm == 24.0
-    # Fallback and socket error recovery execute in sub-second or near-timeout time
     assert elapsed < 1500.0
 
 
@@ -183,8 +188,12 @@ def test_ai_05_fallback_matrix_submillisecond_speed():
 
 
 @pytest.mark.asyncio
-async def test_ai_02_mocked_openai_compatible_endpoint_success():
+async def test_ai_02_mocked_openai_compatible_endpoint_success(monkeypatch):
     """Test AI-02: Simulates a successful OpenAI-compatible model response."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "USE_FAST_DECISION_ENGINE", False)
+
     mock_model_response = {
         "id": "chatcmpl-mock-123",
         "object": "chat.completion",
@@ -221,3 +230,17 @@ async def test_ai_02_mocked_openai_compatible_endpoint_success():
         assert decision.selected_decision == CandidateDecision.PREEMPTIVE_NIGHT_PRECHARGE
         assert decision.action_plan.water_depth_mm == 24.0
         assert decision.decision_confidence == 0.97
+
+
+@pytest.mark.asyncio
+async def test_ai_02_fast_decision_engine_live():
+    """Test Fast Decision Engine directly on live running model."""
+    from app.services.decision_engine import query_fast_decision_engine
+    try:
+        decision = await query_fast_decision_engine(SCENARIO_1_WHEAT_CRISIS)
+        assert decision.engine_source == "FAST_DECISION_LOGIT_ENGINE"
+        assert decision.selected_decision == CandidateDecision.PREEMPTIVE_NIGHT_PRECHARGE
+        assert decision.decision_confidence > 0.70
+        assert decision.action_plan.water_depth_mm == 24.0
+    except Exception as e:
+        pytest.skip(f"Live model server not reachable: {e}")

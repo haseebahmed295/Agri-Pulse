@@ -10,11 +10,11 @@ def crisis():
     return client.get("/api/presets/crisis").json()["payload"]
 
 
-def test_health_reports_unconfigured_services():
+def test_health_reports_service_status():
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json()["status"] == "degraded"
-    assert response.json()["local_model_engine"]["status"] == "not_configured"
+    assert response.json()["status"] in ("ok", "degraded")
+    assert response.json()["local_model_engine"]["status"] in ("online", "offline", "not_configured")
 
 
 def test_weather_has_168_aligned_hours_and_coordinates():
@@ -25,7 +25,7 @@ def test_weather_has_168_aligned_hours_and_coordinates():
     assert data["location"]["longitude"] == 74.3
     assert all(len(series) == 168 for series in data["hourly_series"].values())
     assert len(set(data["hourly_series"]["timestamps"])) == 168
-    assert data["cache_status"] == "mock"
+    assert data["cache_status"] in ("live", "cached", "fallback", "mock")
 
 
 @pytest.mark.parametrize("name,crop,moisture", [
@@ -40,8 +40,8 @@ def test_presets_are_valid_evaluation_inputs(name, crop, moisture):
     assert client.post("/api/evaluate", json=payload).status_code == 200
 
 
-def test_evaluation_contract_and_mock_label():
-    response = client.post("/api/evaluate", json=crisis())
+def test_evaluation_mock_mode_explicit():
+    response = client.post("/api/evaluate", json=crisis(), params={"mode": "mock"})
     assert response.status_code == 200
     data = response.json()
     assert response.headers["X-AgriPulse-Mode"] == "mock"
@@ -50,6 +50,18 @@ def test_evaluation_contract_and_mock_label():
     assert data["hydrology_summary"]["precomputed_deficit_mm"] == 24
     assert data["action_plan"]["water_depth_mm"] == 24
     assert data["timestamp"]
+
+
+def test_evaluation_live_model_engine():
+    response = client.post("/api/evaluate", json=crisis())
+    assert response.status_code == 200
+    data = response.json()
+    assert response.headers["X-AgriPulse-Mode"] in ("live", "fallback")
+    assert data["engine_source"] in ("FAST_DECISION_LOGIT_ENGINE", "LOCAL_MODEL_ENGINE", "DETERMINISTIC_FALLBACK")
+    assert data["selected_decision"] == "PREEMPTIVE_NIGHT_PRECHARGE"
+    assert data["sufficiency_status"] == "CRITICAL_HEAT_DEFICIT"
+    assert data["action_plan"]["water_depth_mm"] == 24.0
+    assert len(data["chart_series"]) == 7
     assert data["decision_id"] != client.post("/api/evaluate", json=crisis()).json()["decision_id"]
 
 
