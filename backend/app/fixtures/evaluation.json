@@ -1,0 +1,95 @@
+{
+  "decision_id": "7b8e1a2f-5b6d-4d2b-9a1c-3e4f5a6b7c8d",
+  "timestamp": "2026-10-10T10:35:12Z",
+  "engine_source": "LOCAL_MODEL_ENGINE",
+  "inference_latency_ms": 28.4,
+  "total_latency_ms": 34.1,
+  "sufficiency_status": "CRITICAL_HEAT_DEFICIT",
+  "selected_decision": "PREEMPTIVE_NIGHT_PRECHARGE",
+  "decision_confidence": 0.96,
+  "action_plan": {
+    "water_depth_mm": 24.0,
+    "execution_window": "Tonight 22:00 - 04:30 PKT (Prior to Heat Day 1)",
+    "biological_rationale": "Wheat in anthesis faces irreversible pollen sterility if root-zone moisture drops below critical holding thresholds at 41.5C. Deep night pre-charge establishes a transpirational cooling buffer without evaporative loss."
+  },
+  "projected_depletion_timestamp": "Day 2 at 14:00",
+  "hydrology_summary": {
+    "field_capacity_pct": 20.0,
+    "wilting_point_pct": 9.0,
+    "current_moisture_pct": 14.0,
+    "precomputed_deficit_mm": 24.0,
+    "root_depth_cm": 60
+  },
+  "chart_series": [
+    {
+      "day": 1,
+      "date": "Oct 10",
+      "forecast_temp_c": 36.5,
+      "baseline_moisture_pct": 14.0,
+      "protected_moisture_pct": 18.0,
+      "wilting_point_pct": 9.0,
+      "field_capacity_pct": 20.0,
+      "is_critical_heat": false
+    },
+    {
+      "day": 2,
+      "date": "Oct 11",
+      "forecast_temp_c": 41.5,
+      "baseline_moisture_pct": 8.5,
+      "protected_moisture_pct": 14.8,
+      "wilting_point_pct": 9.0,
+      "field_capacity_pct": 20.0,
+      "is_critical_heat": true
+    },
+    {
+      "day": 3,
+      "date": "Oct 12",
+      "forecast_temp_c": 40.0,
+      "baseline_moisture_pct": 5.2,
+      "protected_moisture_pct": 11.4,
+      "wilting_point_pct": 9.0,
+      "field_capacity_pct": 20.0,
+      "is_critical_heat": true
+    },
+    {
+      "day": 4,
+      "date": "Oct 13",
+      "forecast_temp_c": 37.0,
+      "baseline_moisture_pct": 5.0,
+      "protected_moisture_pct": 9.6,
+      "wilting_point_pct": 9.0,
+      "field_capacity_pct": 20.0,
+      "is_critical_heat": false
+    },
+    {
+      "day": 5,
+      "date": "Oct 14",
+      "forecast_temp_c": 34.0,
+      "baseline_moisture_pct": 5.0,
+      "protected_moisture_pct": 9.0,
+      "wilting_point_pct": 9.0,
+      "field_capacity_pct": 20.0,
+      "is_critical_heat": false
+    },
+    {
+      "day": 6,
+      "date": "Oct 15",
+      "forecast_temp_c": 33.5,
+      "baseline_moisture_pct": 5.0,
+      "protected_moisture_pct": 8.5,
+      "wilting_point_pct": 9.0,
+      "field_capacity_pct": 20.0,
+      "is_critical_heat": false
+    },
+    {
+      "day": 7,
+      "date": "Oct 16",
+      "forecast_temp_c": 32.0,
+      "baseline_moisture_pct": 5.0,
+      "protected_moisture_pct": 8.0,
+      "wilting_point_pct": 9.0,
+      "field_capacity_pct": 20.0,
+      "is_critical_heat": false
+    }
+  ]
+}

@@ -1,13 +1,15 @@
 """Agri-Pulse AI Decision Engine Service.
 
-Implements prompt assembly, OpenAI-compatible local/remote client communication,
+Implements prompt assembly, fast single-pass logit scoring (/completion),
+OpenAI-compatible chat completions (/v1/chat/completions),
 instant deterministic agronomic fallback, and execution orchestration with guardrails.
 Conforms to SPEC-AGRI-AI-002.
 """
 
 import json
+import math
 import time
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 import httpx
 
 from app.config import settings
@@ -101,12 +103,49 @@ EXPECTED OUTPUT:
 }
 """
 
+CANDIDATE_CHOICES: List[Tuple[str, str]] = [
+    ("HOLD_CURRENT_LEVEL", "No action needed; root soil moisture buffer is sufficient; extra water risks hypoxia."),
+    ("PREEMPTIVE_NIGHT_PRECHARGE", "Deep night pre-charge before heatwave for flowering crops facing pollen sterility."),
+    ("SPLIT_CYCLE_LIGHT_IRRIGATION", "Split cyclic light irrigation to prevent blossom drop, fruit scald, and midday wilting."),
+    ("EMERGENCY_CANOPY_COOLING", "Direct canopy misting/cooling during extreme heat."),
+]
+
 
 def _normalize_state_dict(state: Dict[str, Any] | AIDecisionInputPayload) -> Dict[str, Any]:
     """Ensures state is represented as a clean dictionary."""
     if isinstance(state, AIDecisionInputPayload):
         return state.model_dump()
     return state
+
+
+def _format_state_summary(data: Dict[str, Any]) -> str:
+    """Produces a clean, dense textual summary of the field and weather state."""
+    crop = data.get("crop_context", {})
+    hydrology = data.get("hydrology_summary", {})
+    hazard = data.get("hazard_profile", {})
+
+    crop_name = crop.get("crop", "Crop")
+    stage = crop.get("growth_stage", "Vegetative")
+    thresh = crop.get("thermal_threshold_c", 38.0)
+    vuln = crop.get("primary_heat_vulnerability", "Thermal stress")
+
+    soil = hydrology.get("soil_type", "Loam")
+    current_m = hydrology.get("current_moisture_pct", 15.0)
+    fc = hydrology.get("field_capacity_pct", 25.0)
+    wp = hydrology.get("wilting_point_pct", 12.0)
+    deficit = hydrology.get("precomputed_deficit_mm", 0.0)
+
+    heatwave = hazard.get("is_heatwave_active", False)
+    peak_t = hazard.get("peak_temperature_c", 35.0)
+    days_peak = hazard.get("days_until_peak", 1)
+
+    deficit_note = " (Moisture buffer is high, additional water causes root hypoxia)" if deficit <= 0.0 else ""
+
+    return (
+        f"Crop: {crop_name} at stage '{stage}' (Thermal Threshold: {thresh}°C, Vulnerability: {vuln}). "
+        f"Hydrology: Soil '{soil}', Current Moisture: {current_m}%, Field Capacity: {fc}%, Wilting Point: {wp}%, Precomputed Deficit: {deficit} mm{deficit_note}. "
+        f"Hazard: Heatwave Active={heatwave}, Peak Temp={peak_t}°C in {days_peak} days."
+    )
 
 
 def deterministic_fallback(
@@ -200,10 +239,136 @@ def deterministic_fallback(
     )
 
 
+async def query_fast_decision_engine(
+    state: Dict[str, Any] | AIDecisionInputPayload,
+) -> DecisionOutput:
+    """Performs single-pass logit scoring (n_predict=1) on llama-server /completion endpoint (~40-200ms).
+
+    Directly leverages the single-token decision architecture from D:\\Models\\browser\\harness\\decision.py.
+    """
+    data = _normalize_state_dict(state)
+    symbols = [chr(ord("A") + i) for i in range(len(CANDIDATE_CHOICES))]
+    schema_lines = "\n".join(
+        [f"[{symbols[i]}] {name} - {desc}" for i, (name, desc) in enumerate(CANDIDATE_CHOICES)]
+    )
+    state_str = _format_state_summary(data)
+
+    prompt = (
+        "<|im_start|>system\n"
+        "You are an expert autonomous agronomic dispatch officer and thermal plant physiologist. "
+        "Choose the single letter symbol (A, B, C, or D) corresponding to the optimal tactical irrigation directive.<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"State: {state_str}\n\n"
+        "Question: Which tactical irrigation directive must be executed?\n"
+        f"Choices:\n{schema_lines}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n</think>\n"
+        '{"decision": "'
+    )
+
+    payload = {
+        "prompt": prompt,
+        "n_predict": 1,
+        "temperature": 1.0,
+        "top_k": 0,
+        "top_p": 1.0,
+        "n_probs": 32,
+        "samplers": ["temperature"],
+        "stop": ['"', "}", "\n"],
+    }
+
+    url = f"{settings.LOCAL_MODEL_BASE_URL.rstrip('/')}/completion"
+
+    async with httpx.AsyncClient(timeout=settings.AI_MODEL_TIMEOUT_SECONDS) as client:
+        response = await client.post(url, json=payload)
+        response.raise_for_status()
+        res_json = response.json()
+
+    top_logprobs = res_json.get("completion_probabilities", [{}])[0].get("top_logprobs", [])
+    cand_logprobs: Dict[int, float] = {}
+    for i, sym in enumerate(symbols):
+        found = None
+        for item in top_logprobs:
+            tok = item.get("token", "").strip().upper()
+            if tok == sym:
+                found = item.get("logprob")
+                break
+        cand_logprobs[i] = found if found is not None else -50.0
+
+    max_lp = max(cand_logprobs.values())
+    exp_vals = {k: math.exp(lp - max_lp) for k, lp in cand_logprobs.items()}
+    sum_exp = sum(exp_vals.values()) or 1.0
+    norm_probs = {k: round(v / sum_exp, 4) for k, v in exp_vals.items()}
+    best_idx = max(norm_probs, key=norm_probs.get)
+
+    selected_choice_name = CANDIDATE_CHOICES[best_idx][0]
+    confidence = norm_probs[best_idx]
+
+    # Map candidate choice into full ActionPlan
+    deficit = float(data.get("hydrology_summary", {}).get("precomputed_deficit_mm", 0.0))
+    crop_name = data.get("crop_context", {}).get("crop", "Crop")
+    peak_temp = data.get("hazard_profile", {}).get("peak_temperature_c", 38.0)
+    soil_type = data.get("hydrology_summary", {}).get("soil_type", "Soil")
+    stage_name = data.get("crop_context", {}).get("growth_stage", "current stage")
+    current_m = data.get("hydrology_summary", {}).get("current_moisture_pct", 15.0)
+
+    if selected_choice_name == "PREEMPTIVE_NIGHT_PRECHARGE":
+        status = SufficiencyStatus.CRITICAL_HEAT_DEFICIT
+        action = CandidateDecision.PREEMPTIVE_NIGHT_PRECHARGE
+        depth = deficit
+        window = "Tonight 22:00 - 04:30 PKT (Prior to Heat Day 1)"
+        damage_reason = "irreversible pollen sterility" if ("Flowering" in stage_name or "Anthesis" in stage_name) else "acute thermal dehydration"
+        rationale = (
+            f"{crop_name} faces {damage_reason} if root-zone moisture drops "
+            f"below critical holding thresholds at {peak_temp}°C. Deep night pre-charge establishes a transpirational cooling buffer."
+        )
+    elif selected_choice_name == "SPLIT_CYCLE_LIGHT_IRRIGATION":
+        status = SufficiencyStatus.CRITICAL_HEAT_DEFICIT
+        action = CandidateDecision.SPLIT_CYCLE_LIGHT_IRRIGATION
+        depth = round(deficit / 2.0, 1)
+        window = "Pulsed cycle: 05:00 - 07:00 AM and 20:00 - 22:00 PKT daily"
+        rationale = (
+            f"Acute heat onset in under 24 hours on {soil_type} requires split drip pulsing to sustain "
+            f"{crop_name} vascular turgor and micro-climate cooling without surface pooling."
+        )
+    elif selected_choice_name == "EMERGENCY_CANOPY_COOLING":
+        status = SufficiencyStatus.CRITICAL_HEAT_DEFICIT
+        action = CandidateDecision.EMERGENCY_CANOPY_COOLING
+        depth = min(deficit, 10.0)
+        window = "Daytime misting bursts: 11:00 - 16:00 PKT"
+        rationale = f"Direct canopy cooling active during {peak_temp}°C peak heat hazard."
+    else:  # HOLD_CURRENT_LEVEL
+        status = SufficiencyStatus.SUFFICIENT_NO_ACTION
+        action = CandidateDecision.HOLD_CURRENT_LEVEL
+        depth = 0.0
+        window = "No action required during current forecast window"
+        rationale = (
+            f"Soil moisture in {soil_type} soil is adequate ({current_m}%). "
+            f"Additional watering for {crop_name} risks root-zone oxygen starvation (hypoxia)."
+        )
+
+    depletion = data.get("hydrology_summary", {}).get("simulated_depletion", {})
+    failure_day = depletion.get("projected_failure_day")
+    projected_timestamp = f"Day {failure_day} at 14:00" if failure_day else None
+
+    return DecisionOutput(
+        engine_source="FAST_DECISION_LOGIT_ENGINE",
+        sufficiency_status=status,
+        selected_decision=action,
+        decision_confidence=confidence,
+        projected_depletion_timestamp=projected_timestamp,
+        action_plan=ActionPlan(
+            water_depth_mm=depth,
+            execution_window=window,
+            biological_rationale=rationale,
+        ),
+    )
+
+
 async def query_openai_compatible_model(
     state: Dict[str, Any] | AIDecisionInputPayload,
 ) -> DecisionOutput:
-    """Queries any standard OpenAI-compatible chat completion endpoint with JSON formatting."""
+    """Queries OpenAI-compatible chat completion endpoint with thinking disabled."""
     data = _normalize_state_dict(state)
     endpoint = f"{settings.OPENAI_API_BASE_URL.rstrip('/')}/chat/completions"
 
@@ -218,6 +383,9 @@ async def query_openai_compatible_model(
             {"role": "user", "content": json.dumps(data)},
         ],
         "temperature": 0.05,
+        "max_tokens": 300,
+        "chat_template_kwargs": {"enable_thinking": False},
+        "enable_thinking": False,
         "response_format": {"type": "json_object"},
     }
 
@@ -226,11 +394,9 @@ async def query_openai_compatible_model(
         response.raise_for_status()
         raw_json = response.json()
         content = raw_json["choices"][0]["message"]["content"]
-        
-        # Parse the structured JSON response
+
         parsed = json.loads(content)
-        
-        # Inject timestamp from state if not populated by model
+
         depletion = data.get("hydrology_summary", {}).get("simulated_depletion", {})
         failure_day = depletion.get("projected_failure_day")
         if "projected_depletion_timestamp" not in parsed or not parsed["projected_depletion_timestamp"]:
@@ -245,20 +411,37 @@ async def evaluate_field_decision(
 ) -> DecisionOutput:
     """Coordinates AI model evaluation, latency measurement, guardrails, and deterministic fallback.
 
-    Ensures the response always returns valid, boundary-checked DecisionOutput.
+    Prioritizes fast decision logit scoring, falls back to chat completions, and guarantees
+    <1ms deterministic fallback recovery if offline.
     """
     start_time = time.perf_counter()
     data = _normalize_state_dict(state)
 
-    try:
-        decision = await query_openai_compatible_model(data)
-        source = "OPENAI_COMPATIBLE_ENGINE"
-    except Exception as e:
-        # Transparently recover with deterministic rule matrix in <1ms
-        decision = deterministic_fallback(data, reason=str(e))
+    decision: DecisionOutput | None = None
+    source = "DETERMINISTIC_FALLBACK"
+
+    # Step 1: Try Fast Decision Engine if enabled
+    if settings.USE_FAST_DECISION_ENGINE:
+        try:
+            decision = await query_fast_decision_engine(data)
+            source = "FAST_DECISION_LOGIT_ENGINE"
+        except Exception:
+            decision = None
+
+    # Step 2: Try Chat Completions if fast decision failed or disabled
+    if decision is None:
+        try:
+            decision = await query_openai_compatible_model(data)
+            source = "OPENAI_COMPATIBLE_ENGINE"
+        except Exception:
+            decision = None
+
+    # Step 3: Instant deterministic fallback recovery
+    if decision is None:
+        decision = deterministic_fallback(data, reason="Model server offline or timed out")
         source = "DETERMINISTIC_FALLBACK"
 
-    # Enforce physical and agronomic guardrails
+    # Step 4: Enforce physical and agronomic guardrails
     decision = post_inference_guardrails(decision, data)
 
     elapsed_ms = round((time.perf_counter() - start_time) * 1000, 1)
