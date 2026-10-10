@@ -130,18 +130,40 @@ function getOfflineSimulation(payload: FieldPayload, latency: number): EvaluateR
     rationale = `Active deficit of ${deficit.toFixed(1)} mm on ${payload.soil_texture}. Replenishment prescribed to maintain vigorous root transpiration.`;
   }
 
-  const updatedChart = MOCK_FALLBACK_EVALUATION.chart_series.map((point) => {
+  // 7-day dynamic depletion projection starting from actual current moisture
+  let baseMoist = payload.current_moisture_pct;
+  const waterVwcBoost = depth > 0 ? (depth / (rootDepth / 10.0)) : 0;
+  let protMoist = Math.min(fc, payload.current_moisture_pct + waterVwcBoost);
+
+  const updatedChart = MOCK_FALLBACK_EVALUATION.chart_series.map((point, idx) => {
     const adjustedTemp = point.forecast_temp_c + (point.day === 2 ? tempOffset : tempOffset * 0.4);
-    const baseline = Math.max(3.5, point.baseline_moisture_pct - (isHeatwave ? 2.8 : 1.2));
-    const protectedMoist = Math.min(fc, baseline + (depth > 0 ? depth * 0.35 : 0));
+    const isCrit = adjustedTemp >= 38.0;
+
+    if (idx > 0) {
+      const dailyEtLoss = isCrit ? 3.4 : 1.8;
+      // Baseline drying without intervention:
+      baseMoist = Math.max(Math.max(3.5, wp - 5.0), baseMoist - dailyEtLoss);
+
+      // Protected moisture with prescribed action:
+      const protEtLoss = isCrit ? 2.4 : 1.3;
+      protMoist = protMoist - protEtLoss;
+      if (depth > 0 || payload.current_moisture_pct >= targetMoist) {
+        // Safe watering or optimal holding keeps root zone buffered safely above wilting danger
+        protMoist = Math.max(wp + 1.8, protMoist);
+      } else {
+        protMoist = Math.max(wp - 1.0, protMoist);
+      }
+      protMoist = Math.min(fc, protMoist);
+    }
+
     return {
       ...point,
       forecast_temp_c: Number(adjustedTemp.toFixed(1)),
-      baseline_moisture_pct: Number(baseline.toFixed(1)),
-      protected_moisture_pct: Number(protectedMoist.toFixed(1)),
+      baseline_moisture_pct: Number(baseMoist.toFixed(1)),
+      protected_moisture_pct: Number(protMoist.toFixed(1)),
       wilting_point_pct: wp,
       field_capacity_pct: fc,
-      is_critical_heat: adjustedTemp >= 38.0,
+      is_critical_heat: isCrit,
     };
   });
 

@@ -145,7 +145,8 @@ def _generate_chart_series(
             daily_loss = 4.5 if is_crit else 2.2
             base_m = max(5.0, round(base_m - daily_loss, 1))
             prot_loss = 3.2 if is_crit else 1.8
-            prot_m = max(pwp + 1.0, round(prot_m - prot_loss, 1))
+            safe_floor = pwp + 1.8 if (applied_water_mm > 0 or initial_m >= 0.85 * fc) else pwp + 0.5
+            prot_m = max(safe_floor, round(prot_m - prot_loss, 1))
 
         chart.append(
             ChartPoint(
