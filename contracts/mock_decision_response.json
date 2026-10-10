@@ -1,0 +1,14 @@
+{
+  "decision_id": "7b8e1a2f-5b6d-4d2b-9a1c-3e4f5a6b7c8d",
+  "inference_latency_ms": 24.5,
+  "engine_source": "LOCAL_MODEL_ENGINE",
+  "sufficiency_status": "CRITICAL_HEAT_DEFICIT",
+  "selected_decision": "PREEMPTIVE_NIGHT_PRECHARGE",
+  "decision_confidence": 0.96,
+  "projected_depletion_timestamp": "Day 2 at 14:00",
+  "action_plan": {
+    "water_depth_mm": 24.0,
+    "execution_window": "Tonight 22:00 - 04:30 PKT (Prior to Heat Day 1)",
+    "biological_rationale": "Wheat in anthesis faces irreversible pollen sterility if root-zone moisture drops below critical holding thresholds at 41.5°C. Deep night pre-charge establishes a transpirational cooling buffer without evaporative loss."
+  }
+}

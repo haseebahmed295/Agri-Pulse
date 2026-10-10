@@ -1,0 +1,35 @@
+{
+  "crop_context": {
+    "crop": "Wheat",
+    "growth_stage": "Flowering / Anthesis",
+    "thermal_threshold_c": 38.0,
+    "primary_heat_vulnerability": "Pollen sterility and flower abortion"
+  },
+  "hydrology_summary": {
+    "soil_type": "Sandy Loam",
+    "current_moisture_pct": 14.0,
+    "field_capacity_pct": 20.0,
+    "wilting_point_pct": 9.0,
+    "precomputed_deficit_mm": 24.0,
+    "simulated_depletion": {
+      "crosses_wilting_point": true,
+      "projected_failure_day": 2,
+      "hours_until_stress_onset": 38
+    }
+  },
+  "hazard_profile": {
+    "is_heatwave_active": true,
+    "peak_temperature_c": 41.5,
+    "baseline_seasonal_avg_c": 33.0,
+    "heatwave_duration_days": 3,
+    "days_until_peak": 2,
+    "total_forecasted_rain_mm": 0.0
+  },
+  "irrigation_system": "Furrow_Flood",
+  "candidate_decisions": [
+    "HOLD_CURRENT_LEVEL",
+    "PREEMPTIVE_NIGHT_PRECHARGE",
+    "SPLIT_CYCLE_LIGHT_IRRIGATION",
+    "EMERGENCY_CANOPY_COOLING"
+  ]
+}
